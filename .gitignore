@@ -1,0 +1,47 @@
+# Env
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb~
+
+# Dados brutos (podem ser grandes)
+data/raw/*.csv
+data/raw/*.parquet
+data/raw/*.json
+data/processed/*.parquet
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/sample/
+
+# Modelos treinados
+outputs/models/*.pkl
+outputs/models/*.pt
+outputs/models/*.joblib
+mlruns/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# ChromaDB
+chroma_db/
