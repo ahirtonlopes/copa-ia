@@ -68,8 +68,16 @@ class TournamentSimulator:
         """
         Simula um único jogo. Retorna (vencedor, (gols_a, gols_b)).
         Em mata-mata, prorrogação e pênaltis resolvem empates.
+
+        Usa np.random.poisson diretamente para máxima velocidade.
         """
-        goals_a, goals_b = self.model.simulate_match(team_a, team_b, neutral=True)
+        # Lookup dos lambdas diretamente — evita construir a matriz 9×9 inteira
+        str_a = self.model.TEAM_STRENGTH.get(team_a, self.model.DEFAULT_STRENGTH)
+        str_b = self.model.TEAM_STRENGTH.get(team_b, self.model.DEFAULT_STRENGTH)
+        lambda_a = str_a["attack"] * str_b["defense"] * self.model.HOME_ADVANTAGE
+        lambda_b = str_b["attack"] * str_a["defense"]
+        goals_a = int(np.random.poisson(lambda_a))
+        goals_b = int(np.random.poisson(lambda_b))
 
         # Em mata-mata, empate vai para pênaltis (50/50 + ruído)
         if knockout and goals_a == goals_b:
