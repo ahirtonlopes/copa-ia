@@ -4,7 +4,7 @@
 
 ### Inteligência Artificial aplicada à Copa do Mundo 2026
 
-*De regressão logística a agentes de Reinforcement Learning — usando o torneio mais assistido do planeta como laboratório de IA*
+*De regressão logística a agentes de Reinforcement Learning - usando o torneio mais assistido do planeta como laboratório de IA*
 
 [![CI](https://github.com/ahirtonlopes/copa-ia/actions/workflows/ci.yml/badge.svg)](https://github.com/ahirtonlopes/copa-ia/actions)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)](https://python.org)
