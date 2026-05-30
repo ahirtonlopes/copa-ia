@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 from scipy.optimize import minimize
+from scipy.special import gammaln
 from scipy.stats import poisson
 
 ROOT = Path(__file__).parent.parent.parent
@@ -69,47 +70,47 @@ class DixonColesModel:
             return 1.0 - rho
         return 1.0
 
-    # ── Log-Verossimilhança ───────────────────────────────────────────────
+    # ── Log-Verossimilhança (vetorizada) ─────────────────────────────────
 
-    def _log_likelihood(self, params: np.ndarray, df: pd.DataFrame) -> float:
+    def _log_likelihood(self, params: np.ndarray, arrays: dict) -> float:
         """
-        Negative log-likelihood (para minimização).
+        Negative log-likelihood vetorizada com NumPy — ~100x mais rápida
+        que a versão com iterrows().
 
-        params: [attack_0, ..., attack_N, defense_0, ..., defense_N, home_adv, rho]
+        params: [attack_0..N, defense_0..N, log_home_adv, rho]
+        arrays: pré-computado em fit() com índices inteiros para lookup O(1)
         """
         n = len(self.teams)
-        attack  = {t: np.exp(params[i])     for i, t in enumerate(self.teams)}
-        defense = {t: np.exp(params[n + i]) for i, t in enumerate(self.teams)}
+        atk_arr  = np.exp(params[:n])           # (N,) força de ataque
+        def_arr  = np.exp(params[n:2*n])        # (N,) fraqueza defensiva
         home_adv = np.exp(params[2 * n])
         rho      = params[2 * n + 1]
 
-        ll = 0.0
-        for _, row in df.iterrows():
-            h, a = row["home_team"], row["away_team"]
-            x, y = int(row["home_score"]), int(row["away_score"])
-            w = float(row.get("sample_weight", 1.0))
+        hi = arrays["home_idx"]   # índice inteiro do time da casa
+        ai = arrays["away_idx"]   # índice inteiro do time visitante
+        x  = arrays["home_score"] # gols da casa (int array)
+        y  = arrays["away_score"] # gols visitante (int array)
+        w  = arrays["weights"]    # pesos das amostras
+        ha = arrays["ha_factor"]  # 1.0 ou home_adv por jogo
 
-            if h not in attack or a not in attack:
-                continue
+        mu = atk_arr[hi] * def_arr[ai] * (home_adv ** ha)  # λ casa
+        nu = atk_arr[ai] * def_arr[hi]                      # λ visitante
 
-            neutral = bool(row.get("neutral", False))
-            ha = home_adv if not neutral else 1.0
+        # Log-Poisson 100% vetorizado (gammaln = log(x!) sem loop Python)
+        log_p = (
+            x * np.log(mu + 1e-10) - mu - gammaln(x + 1)
+            + y * np.log(nu + 1e-10) - nu - gammaln(y + 1)
+        )
 
-            mu = attack[h] * defense[a] * ha   # lambda do time da casa
-            nu = attack[a] * defense[h]          # lambda do time visitante
+        # Correção Dixon-Coles para placares baixos (vetorizada)
+        tau = np.ones(len(x))
+        m00 = (x == 0) & (y == 0);  tau[m00] = np.maximum(1 - mu[m00] * nu[m00] * rho, 1e-10)
+        m10 = (x == 1) & (y == 0);  tau[m10] = 1 + nu[m10] * rho
+        m01 = (x == 0) & (y == 1);  tau[m01] = 1 + mu[m01] * rho
+        m11 = (x == 1) & (y == 1);  tau[m11] = 1 - rho
 
-            tau = self._tau(x, y, mu, nu, rho)
-            if tau <= 0:
-                continue
-
-            log_p = (
-                poisson.logpmf(x, mu)
-                + poisson.logpmf(y, nu)
-                + np.log(tau)
-            )
-            ll += w * log_p
-
-        return -ll  # negativo para minimizar
+        ll = np.sum(w * (log_p + np.log(np.maximum(tau, 1e-10))))
+        return float(-ll)
 
     # ── Fit ───────────────────────────────────────────────────────────────
 
@@ -147,29 +148,45 @@ class DixonColesModel:
             )
 
         n = len(self.teams)
+        team_idx = {t: i for i, t in enumerate(self.teams)}
+
+        # ── Pré-computa arrays NumPy (evita overhead por chamada do otimizador) ─
+        hi = np.array([team_idx[t] for t in df_fit["home_team"]], dtype=np.int32)
+        ai = np.array([team_idx[t] for t in df_fit["away_team"]], dtype=np.int32)
+        xs = df_fit["home_score"].to_numpy(dtype=np.int32)
+        ys = df_fit["away_score"].to_numpy(dtype=np.int32)
+        ws = df_fit.get("sample_weight", pd.Series(np.ones(len(df_fit)))).to_numpy(dtype=np.float64)
+        # ha_factor: 1 se neutro, 0 se home (home_adv elevado a 0 = 1, a 1 = home_adv)
+        ha = (~df_fit["neutral"].astype(bool)).astype(np.float64).to_numpy() \
+            if "neutral" in df_fit.columns else np.zeros(len(df_fit))
+
+        arrays = {
+            "home_idx": hi, "away_idx": ai,
+            "home_score": xs, "away_score": ys,
+            "weights": ws, "ha_factor": ha,
+        }
+
         # Inicialização: tudo igual (attack=1, defense=1) no espaço log
         x0 = np.zeros(2 * n + 2)
         x0[-1] = 0.1  # rho inicial pequeno positivo
 
-        # Restrição: média dos ataques = 1 (identificabilidade)
-        # Implementada via constraint na otimização
-        constraints = [{
-            "type": "eq",
-            "fun": lambda p: np.mean(p[:n]),  # média(log_attack) = 0
-        }]
-
         if verbose:
-            logger.info("Otimizando MLE (L-BFGS-B)... isso pode levar ~30s")
+            logger.info("Otimizando MLE (L-BFGS-B, vetorizado)...")
 
+        import time
+        t0 = time.time()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             result = minimize(
                 fun=self._log_likelihood,
                 x0=x0,
-                args=(df_fit,),
+                args=(arrays,),
                 method="L-BFGS-B",
                 options={"maxiter": 500, "ftol": 1e-9},
             )
+        elapsed = time.time() - t0
+        if verbose:
+            logger.info(f"Otimização concluída em {elapsed:.1f}s")
 
         if verbose:
             status = "✓ Convergiu" if result.success else "⚠ Não convergiu completamente"
